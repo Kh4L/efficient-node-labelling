@@ -15,52 +15,36 @@ from torch_geometric.utils import (degree, from_scipy_sparse_matrix,
                                    train_test_split_edges)
 
 def get_dataset(root, name: str):
-    if name.startswith('ogbl-'):
-        dataset = PygLinkPropPredDataset(name=name, root=root)
-        data = dataset[0]
-        """
-            SparseTensor's value is NxNx1 for collab. due to edge_weight is |E|x1
-            NeuralNeighborCompletion just set edge_weight=None
-            ELPH use edge_weight
-        """
+    dataset = PygLinkPropPredDataset(name=name, root=root)
+    data = dataset[0]
+    """
+        SparseTensor's value is NxNx1 for collab. due to edge_weight is |E|x1
+        NeuralNeighborCompletion just set edge_weight=None
+        ELPH use edge_weight
+    """
 
-        split_edge = dataset.get_edge_split()
-        if 'edge_weight' in data:
-            data.edge_weight = data.edge_weight.view(-1).to(torch.float)
-        if 'edge' in split_edge['train']:
-            key = 'edge'
-        else:
-            key = 'source_node'
-        print("-"*20)
-        print(f"train: {split_edge['train'][key].shape[0]}")
-        print(f"{split_edge['train'][key]}")
-        print(f"valid: {split_edge['valid'][key].shape[0]}")
-        print(f"test: {split_edge['test'][key].shape[0]}")
-        print(f"max_degree:{degree(data.edge_index[0], data.num_nodes).max()}")
-        data = ToUndirected()(data)
-        data = ToSparseTensor(remove_edge_index=False)(data)
-        data.full_adj_t = data.adj_t
-        # make node feature as float
-        if data.x is not None:
-            data.x = data.x.to(torch.float)
-        if name != 'ogbl-ddi':
-            del data.edge_index
-        return data, split_edge
-
-    data = load_unsplitted_data(root, name)
-    return data, None
-
-def load_unsplitted_data(root,name):
-    # read .mat format files
-    data_dir = root + '/{}.mat'.format(name)
-    # print('Load data from: '+ data_dir)
-    import scipy.io as sio
-    net = sio.loadmat(data_dir)
-    edge_index,_ = from_scipy_sparse_matrix(net['net'])
-    data = Data(edge_index=edge_index,num_nodes = torch.max(edge_index).item()+1)
-    if is_undirected(data.edge_index) == False: #in case the dataset is directed
-        data.edge_index = to_undirected(data.edge_index)
-    return data
+    split_edge = dataset.get_edge_split()
+    if 'edge_weight' in data:
+        data.edge_weight = data.edge_weight.view(-1).to(torch.float)
+    if 'edge' in split_edge['train']:
+        key = 'edge'
+    else:
+        key = 'source_node'
+    print("-"*20)
+    print(f"train: {split_edge['train'][key].shape[0]}")
+    print(f"{split_edge['train'][key]}")
+    print(f"valid: {split_edge['valid'][key].shape[0]}")
+    print(f"test: {split_edge['test'][key].shape[0]}")
+    print(f"max_degree:{degree(data.edge_index[0], data.num_nodes).max()}")
+    data = ToUndirected()(data)
+    data = ToSparseTensor(remove_edge_index=False)(data)
+    data.full_adj_t = data.adj_t
+    # make node feature as float
+    if data.x is not None:
+        data.x = data.x.to(torch.float)
+    if name != 'ogbl-ddi':
+        del data.edge_index
+    return data, split_edge
 
 def set_random_seeds(random_seed=0):
     r"""Sets the seed for generating random numbers."""
@@ -70,7 +54,6 @@ def set_random_seeds(random_seed=0):
     # torch.backends.cudnn.benchmark = False
     np.random.seed(random_seed)
     random.seed(random_seed)
-
 
 # random split dataset
 def randomsplit(data, val_ratio: float=0.10, test_ratio: float=0.2):
@@ -102,30 +85,7 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def get_data_split(root, name: str, val_ratio, test_ratio, run=0):
-    data_folder = Path(root) / name
-    data_folder.mkdir(parents=True, exist_ok=True)
-    file_path = data_folder / f"split{run}_{int(100*val_ratio)}_{int(100*test_ratio)}.pt"
-    data,_ = get_dataset(root, name)
-    if file_path.exists():
-        split_edge = torch.load(file_path)
-        print(f"load split edges from {file_path}")
-    else:
-        split_edge = randomsplit(data)
-        torch.save(split_edge, file_path)
-        print(f"save split edges to {file_path}")
-    data.edge_index = to_undirected(split_edge["train"]["edge"].t())
-    data.num_features = data.x.shape[0] if data.x is not None else 0
-    print("-"*20)
-    print(f"train: {split_edge['train']['edge'].shape[0]}")
-    print(f"{split_edge['train']['edge'][:10,:]}")
-    print(f"valid: {split_edge['valid']['edge'].shape[0]}")
-    print(f"test: {split_edge['test']['edge'].shape[0]}")
-    print(f"max_degree:{degree(data.edge_index[0], data.num_nodes).max()}")
-    return data, split_edge
-
-
-def data_summary(name: str, data: Data, header=False, latex=False):
+def data_summary(name: str, data: Data):
     num_nodes = data.num_nodes
     num_edges = data.num_edges
     n_degree = data.adj_t.sum(dim=1).to(torch.float)
@@ -138,38 +98,13 @@ def data_summary(name: str, data: Data, header=False, latex=False):
     else:
         attr_dim = '-' # no attribute
 
-    if latex:
-        latex_str = ""
-        if header:
-            latex_str += r"""
-            \begin{table*}[ht]
-            \begin{center}
-            \resizebox{0.85\textwidth}{!}{
-            \begin{tabular}{lccccccc}
-                \toprule
-                \textbf{Dataset} & \textbf{\#Nodes} & \textbf{\#Edges} & \textbf{Avg. node deg.} & \textbf{Std. node deg.} & \textbf{Max. node deg.} & \textbf{Density} & \textbf{Attr. Dimension}\\
-                \midrule"""
-        latex_str += f"""
-                \\textbf{{{name}}}"""
-        latex_str += f""" & {num_nodes} & {num_edges} & {avg_degree:.2f} & {degree_std:.2f} & {max_degree} & {density*100:.4f}\% & {attr_dim} \\\\"""
-        latex_str += r"""
-                \midrule"""
-        if header:
-            latex_str += r"""
-            \bottomrule
-            \end{tabular}
-            }
-            \end{center}
-            \end{table*}"""
-        print(latex_str)
-    else:
-        print("-"*30+'Dataset and Features'+"-"*60)
-        print("{:<10}|{:<10}|{:<10}|{:<15}|{:<15}|{:<15}|{:<10}|{:<15}"\
-            .format('Dataset','#Nodes','#Edges','Avg. node deg.','Std. node deg.','Max. node deg.', 'Density','Attr. Dimension'))
-        print("-"*110)
-        print("{:<10}|{:<10}|{:<10}|{:<15.2f}|{:<15.2f}|{:<15}|{:<9.4f}%|{:<15}"\
-            .format(name, num_nodes, num_edges, avg_degree, degree_std, max_degree, density*100, attr_dim))
-        print("-"*110)
+    print("-"*30+'Dataset and Features'+"-"*60)
+    print("{:<10}|{:<10}|{:<10}|{:<15}|{:<15}|{:<15}|{:<10}|{:<15}"\
+        .format('Dataset','#Nodes','#Edges','Avg. node deg.','Std. node deg.','Max. node deg.', 'Density','Attr. Dimension'))
+    print("-"*110)
+    print("{:<10}|{:<10}|{:<10}|{:<15.2f}|{:<15.2f}|{:<15}|{:<9.4f}%|{:<15}"\
+        .format(name, num_nodes, num_edges, avg_degree, degree_std, max_degree, density*100, attr_dim))
+    print("-"*110)
 
 def initialize(data, method):
     if data.x is None:

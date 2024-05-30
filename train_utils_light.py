@@ -90,16 +90,10 @@ def train_hits(encoder, predictor, data, split_edge, optimizer, batch_size,
     
     optimizer.zero_grad()
     total_loss = total_examples = 0
-    if dataset_name == "ogbl-vessel":
-        neg_edge_epoch = split_edge['train']['edge_neg'].to(device).t()
-    elif dataset_name.startswith("ogbl") and dataset_name != "ogbl-ddi": # use global negative sampling for ddi
-        num_pos_max = max(data.adj_t.nnz()//2, pos_train_edge.size(0))
-        neg_edge_epoch = torch.randint(0, data.adj_t.size(0), 
-                                       size=(2, num_pos_max*num_neg),
-                                        dtype=torch.long, device=device)
-    else:
-        neg_edge_epoch = negative_sampling(data.edge_index, num_nodes=data.adj_t.size(0),
-                                           num_neg_samples=(data.adj_t.nnz()//2)*num_neg)
+    num_pos_max = max(data.adj_t.nnz()//2, pos_train_edge.size(0))
+    neg_edge_epoch = torch.randint(0, data.adj_t.size(0), 
+                                    size=(2, num_pos_max*num_neg),
+                                    dtype=torch.long, device=device)
     for perm in tqdm(DataLoader(range(pos_train_edge.size(0)), batch_size,
                            shuffle=True),desc='Train'):
         edge = pos_train_edge[perm].t()
@@ -110,7 +104,6 @@ def train_hits(encoder, predictor, data, split_edge, optimizer, batch_size,
             adj_t = __spmdiff(adj_t, target_adj, keep_val=True)
         else:
             adj_t = data.adj_t
-
 
         h = encoder(data.x, adj_t)
 
@@ -180,18 +173,18 @@ def test_hits(encoder, predictor, data, split_edge, evaluator,
         predictor(h, adj_t, None, cache_mode='delete')
     
     results = {}
-    for K in [10, 20, 50, 100]:
-        evaluator.K = K
-        valid_hits = evaluator.eval({
-            'y_pred_pos': pos_valid_pred,
-            'y_pred_neg': neg_valid_pred,
-        })[f'hits@{K}']
-        test_hits = evaluator.eval({
-            'y_pred_pos': pos_test_pred,
-            'y_pred_neg': neg_test_pred,
-        })[f'hits@{K}']
+    K = 100
+    evaluator.K = K
+    valid_hits = evaluator.eval({
+        'y_pred_pos': pos_valid_pred,
+        'y_pred_neg': neg_valid_pred,
+    })[f'hits@{K}']
+    test_hits = evaluator.eval({
+        'y_pred_pos': pos_test_pred,
+        'y_pred_neg': neg_test_pred,
+    })[f'hits@{K}']
 
-        results[f'Hits@{K}'] = (valid_hits, test_hits)
+    results[f'Hits@{K}'] = (valid_hits, test_hits)
 
     valid_result = torch.cat((torch.ones(pos_valid_pred.size()), torch.zeros(neg_valid_pred.size())), dim=0)
     valid_pred = torch.cat((pos_valid_pred, neg_valid_pred), dim=0)
@@ -229,13 +222,6 @@ def make_symmetric(sparse_tensor, reduce='sum'):
 
     return symmetric_tensor
 
-# Example usage
-indices = torch.tensor([[0, 1, 2, 1, 3], [1, 2, 0, 0, 3]])  # COO format indices
-values = torch.tensor([3, 4, 5, 3, 42], dtype=torch.float32)  # COO format values
-size = (4, 4)  # Size of the matrix
-
-sparse_tensor = torch.sparse_coo_tensor(indices, values, size)
-
 
 def train_mrr(encoder, predictor, data, split_edge, optimizer, batch_size, 
         mask_target, dataset_name, num_neg):
@@ -254,16 +240,17 @@ def train_mrr(encoder, predictor, data, split_edge, optimizer, batch_size,
         if mask_target:
             adjmask[perm] = 0
             tei = torch.stack((source_edge[adjmask], target_edge[adjmask]), dim=0) # TODO: check if both direction is removed
+    
             adj_t = SparseTensor.from_edge_index(tei,
-                               sparse_sizes=(data.num_nodes, data.num_nodes)).to_device(
+                                   sparse_sizes=(data.num_nodes, data.num_nodes)).to_device(
                                    source_edge.device, non_blocking=True)
             adjmask[perm] = 1
-    
-            # TODO compare my make_sym against to_sym: sparse_tensor_coo vs adj_t.to_symmetric()
-            sparse_tensor_coo  = torch.sparse_coo_tensor(tei, torch.ones((tei.size(1))), (data.num_nodes, data.num_nodes))
-            sprase_tensor_coo = make_symmetric(sparse_tensor)
 
             adj_t = adj_t.to_symmetric()
+
+            #adj_t = torch.sparse_coo_tensor(tei, torch.ones((tei.size(1)), device=tei.device), (data.num_nodes, data.num_nodes))
+            #adj_t = adj_t.coalesce()
+            #adj_t = make_symmetric(adj_t).coalesce()
         else:
             adj_t = data.adj_t
 
