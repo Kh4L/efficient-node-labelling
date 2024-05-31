@@ -15,7 +15,8 @@ from sklearn.metrics import roc_auc_score
 
 from ogb.linkproppred import Evaluator
 
-from models_light import GCN, MLP, SAGE, MPLP
+from models_light import GCN, SAGE, MPLP
+from torch_geometric.nn.models import MLP
 from utils_light import (get_dataset, data_summary, get_git_revision_short_hash,
                    set_random_seeds, str2bool, initial_embedding)
 
@@ -401,7 +402,6 @@ def main():
     parser.add_argument('--jk', type=str2bool, default='True', help='whether to use Jumping Knowledge')
     parser.add_argument('--batchnorm_affine', type=str2bool, default='True', help='whether to use Affine in BatchNorm')
     parser.add_argument('--use_embedding', type=str2bool, default='False', help='whether to train node embedding')
-    # parser.add_argument('--dgcnn', type=str2bool, default='False', help='whether to use DGCNN as the target edge pooling')
 
     # training setting
     parser.add_argument('--batch_size', type=int, default=64 * 1024)
@@ -414,7 +414,7 @@ def main():
     parser.add_argument('--log_steps', type=int, default=20)
     parser.add_argument('--patience', type=int, default=100, help='number of patience steps for early stopping')
     parser.add_argument('--runs', type=int, default=10)
-    parser.add_argument('--metric', type=str, default='Hits@50', help='main evaluation metric')
+    parser.add_argument('--metric', type=str, default='Hits@100', help='main evaluation metric')
 
     # misc
     parser.add_argument('--log_dir', type=str, default='./logs')
@@ -476,24 +476,22 @@ def main():
                         args.hidden_channels, args.num_layers,
                         args.feat_dropout, args.xdp, args.use_feature, args.jk, emb).to(device)
         elif args.encoder == 'mlp':
-            encoder = MLP(args.num_layers, data.num_features, 
-                          args.hidden_channels, args.hidden_channels, args.dropout).to(device)
+            encoder = MLP(num_layers=args.num_layers, in_channels=data.num_features,
+                          hidden_channels=args.hidden_channels, out_channels=args.hidden_channels,
+                          dropout=args.feat_dropout, act=None).to(device)
 
         predictor_in_dim = args.hidden_channels * int(args.use_feature or args.use_embedding)
-                            # * (1 + args.jk * (args.num_layers - 1))
-        if args.predictor in ['inner','mlp']:
-            raise NotImplementedError("LinkPredictor is not implemented in lightweight MPLP")
-        elif 'MPLP' in args.predictor:
-            prop_type = MPLP_dict[args.predictor]
-            predictor = MPLP(predictor_in_dim, args.hidden_channels,
-                                    args.num_layers, args.feat_dropout, args.label_dropout, args.num_hops, 
-                                    prop_type=prop_type, signature_sampling=args.signature_sampling,
-                                    use_degree=args.use_degree, signature_dim=args.signature_dim,
-                                    minimum_degree_onehot=args.minimum_degree_onehot, batchnorm_affine=args.batchnorm_affine,
-                                    feature_combine=args.feature_combine)
-            if prop_type == "precompute":
-                assert args.use_degree != "mlp"
-                predictor.precompute(data.adj_t)
+
+        prop_type = MPLP_dict[args.predictor]
+        predictor = MPLP(predictor_in_dim, args.hidden_channels,
+                                args.num_layers, args.feat_dropout, args.label_dropout, args.num_hops, 
+                                prop_type=prop_type, signature_sampling=args.signature_sampling,
+                                use_degree=args.use_degree, signature_dim=args.signature_dim,
+                                minimum_degree_onehot=args.minimum_degree_onehot, batchnorm_affine=args.batchnorm_affine,
+                                feature_combine=args.feature_combine)
+        if prop_type == "precompute":
+            assert args.use_degree != "mlp"
+            predictor.precompute(data.adj_t)
         predictor = predictor.to(device)
 
         encoder.reset_parameters()

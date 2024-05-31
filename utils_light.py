@@ -1,17 +1,13 @@
 import argparse
-import math
 import random
-from pathlib import Path
 import subprocess
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from ogb.linkproppred import PygLinkPropPredDataset
 from torch_geometric.data import Data
 from torch_geometric.transforms import ToSparseTensor, ToUndirected
-from torch_geometric.utils import (degree, from_scipy_sparse_matrix,
-                                   is_undirected, to_undirected,
+from torch_geometric.utils import (degree, to_undirected,
                                    train_test_split_edges)
 
 def get_dataset(root, name: str):
@@ -55,25 +51,6 @@ def set_random_seeds(random_seed=0):
     np.random.seed(random_seed)
     random.seed(random_seed)
 
-# random split dataset
-def randomsplit(data, val_ratio: float=0.10, test_ratio: float=0.2):
-    def removerepeated(ei):
-        ei = to_undirected(ei)
-        ei = ei[:, ei[0]<ei[1]]
-        return ei
-
-    data = train_test_split_edges(data, test_ratio, test_ratio)
-    split_edge = {'train': {}, 'valid': {}, 'test': {}}
-    num_val = int(data.val_pos_edge_index.shape[1] * val_ratio/test_ratio)
-    data.val_pos_edge_index = data.val_pos_edge_index[:, torch.randperm(data.val_pos_edge_index.shape[1])]
-    split_edge['train']['edge'] = removerepeated(torch.cat((data.train_pos_edge_index, data.val_pos_edge_index[:, :-num_val]), dim=-1)).t()
-    split_edge['valid']['edge'] = removerepeated(data.val_pos_edge_index[:, -num_val:]).t()
-    split_edge['valid']['edge_neg'] = removerepeated(data.val_neg_edge_index).t()
-    split_edge['test']['edge'] = removerepeated(data.test_pos_edge_index).t()
-    split_edge['test']['edge_neg'] = removerepeated(data.test_neg_edge_index).t()
-    return split_edge
-
-
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -83,7 +60,6 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
-
 
 def data_summary(name: str, data: Data):
     num_nodes = data.num_nodes
@@ -106,27 +82,10 @@ def data_summary(name: str, data: Data):
         .format(name, num_nodes, num_edges, avg_degree, degree_std, max_degree, density*100, attr_dim))
     print("-"*110)
 
-def initialize(data, method):
-    if data.x is None:
-        if method == 'one-hot':
-            data.x = F.one_hot(torch.arange(data.num_nodes),num_classes=data.num_nodes).float()
-            input_size = data.num_nodes
-        elif method == 'trainable':
-            node_emb_dim = 512
-            emb = torch.nn.Embedding(data.num_nodes, node_emb_dim)
-            data.emb = emb
-            input_size = node_emb_dim
-        else:
-            raise NotImplementedError
-    else:
-        input_size = data.num_features
-    return data, input_size
-
 def initial_embedding(data, hidden_channels, device):
     embedding= torch.nn.Embedding(data.num_nodes, hidden_channels).to(device)
     torch.nn.init.xavier_uniform_(embedding.weight)
     return embedding
-
 
 def create_input(data):
     if hasattr(data, 'emb') and data.emb is not None:
@@ -137,4 +96,3 @@ def create_input(data):
 
 def get_git_revision_short_hash() -> str:
     return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
-    
