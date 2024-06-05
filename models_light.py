@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.nn import GCNConv, SAGEConv
+from torch_geometric.nn import GCNConv, SGConv
 from torch_geometric.nn.models import MLP
 from torch_geometric.utils import k_hop_subgraph as pyg_k_hop_subgraph, to_edge_index
 
@@ -30,25 +30,19 @@ USE_CUSTOM_MLP=False
 MINIMUM_SIGNATURE_DIM=64
 
 class NodeLabel(torch.nn.Module):
-    def __init__(self, dim: int=1024, signature_sampling="torchhd", prop_type="prop_only",
+    def __init__(self, dim: int=1024, signature_sampling="torchhd",
                  minimum_degree_onehot: int=-1):
         super().__init__()
         self.dim = dim
         self.signature_sampling = signature_sampling
-        self.prop_type = prop_type
         self.cached_two_hop_adj = None
         self.minimum_degree_onehot = minimum_degree_onehot
 
     def forward(self, edges: Tensor, adj_t: SparseTensor, node_weight: Tensor=None, cache_mode=None):
         if cache_mode is not None:
-            if self.prop_type == "prop_only":
-                return self.propagation_only_cache(edges, adj_t, node_weight, cache_mode)
-            elif self.prop_type == "precompute":
-                return self.propagation_prop_only_cache(edges, adj_t, node_weight, cache_mode)
+            return self.propagation_only_cache(edges, adj_t, node_weight, cache_mode)
         else:
-            if self.prop_type == "prop_only":
-                return self.propagation_only(edges, adj_t, node_weight)
-        raise NotImplementedError()
+            return self.propagation_only(edges, adj_t, node_weight)
 
     def get_random_node_vectors(self, adj_t: SparseTensor, node_weight) -> Tensor:
         num_nodes = adj_t.size(0)
@@ -113,50 +107,6 @@ class NodeLabel(torch.nn.Module):
         degree_u = degree_one_hop[new_edges[0]]
         degree_v = degree_one_hop[new_edges[1]]
         return count_1_1, count_1_2, count_2_1, count_2_2, count_self_1_2, count_self_2_1, degree_u, degree_v
-
-    def propagation_prop_only_cache(self, edges: Tensor, adj_t: SparseTensor, node_weight=None, cache_mode=None):
-        if cache_mode == 'build':
-            # get the 2-hop subgraph of the target edges
-            x = self.get_random_node_vectors(adj_t, node_weight=node_weight)
-
-            degree_one_hop = adj_t.sum(dim=1)
-
-            one_hop_x = matmul(adj_t, x)
-            two_iter_x = matmul(adj_t, one_hop_x)
-
-            two_iter_x = two_iter_x - degree_one_hop.view(-1,1)*x
-
-            # caching
-            self.cached_degree_one_hop = degree_one_hop
-
-            self.cached_one_hop_x = one_hop_x
-            self.cached_two_iter_x = two_iter_x
-            return
-        if cache_mode == 'delete':
-            del self.cached_degree_one_hop
-            del self.cached_one_hop_x
-            del self.cached_two_iter_x
-            return
-        if cache_mode == 'use':
-            # loading
-            degree_one_hop = self.cached_degree_one_hop
-
-            one_hop_x = self.cached_one_hop_x
-            two_iter_x = self.cached_two_iter_x
-        count_1_1 = dot_product(one_hop_x[edges[0]] , one_hop_x[edges[1]])
-
-
-        count_1_2_only = dot_product(one_hop_x[edges[0]] , two_iter_x[edges[1]])
-        count_2_1_only = dot_product(two_iter_x[edges[0]] , one_hop_x[edges[1]])
-        count_2_2_only = dot_product((two_iter_x[edges[0]]),\
-                                     (two_iter_x[edges[1]]))
-
-        count_self_1_2 = dot_product(one_hop_x[edges[0]] , two_iter_x[edges[0]])
-        count_self_2_1 = dot_product(one_hop_x[edges[1]] , two_iter_x[edges[1]])
-
-        degree_u = degree_one_hop[edges[0]]
-        degree_v = degree_one_hop[edges[1]]
-        return count_1_1, count_1_2_only, count_2_1_only, count_2_2_only, count_self_1_2, count_self_2_1, degree_u, degree_v
 
     def propagation_only_cache(self, edges: Tensor, adj_t: SparseTensor, node_weight=None, cache_mode=None):
         if cache_mode == 'build':
@@ -328,7 +278,7 @@ class GCN(torch.nn.Module):
             if gcn_name == 'gcn':
                 conv_func = partial(GCNConv, cached=False)
             elif 'pure' in gcn_name:
-                conv_func = partial(PureConv, aggr='gcn')
+                conv_func = SGConv
             self.xemb = nn.Sequential(nn.Dropout(xdropout))
             if ("pure" in gcn_name or num_layers==0):
                 self.xemb.append(nn.Linear(self.input_size, hidden_channels))
@@ -365,66 +315,6 @@ class GCN(torch.nn.Module):
                 sftmax = self.jkparams.reshape(-1, 1, 1)
                 x = torch.sum(jkx*sftmax, dim=0)
         return x
-        
-class SAGE(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers,
-                 dropout, xdropout, use_feature=True, jk=False, embedding=None):
-        super(SAGE, self).__init__()
-
-        self.use_feature = use_feature
-        self.embedding = embedding
-        self.dropout = dropout
-        self.xdropout = xdropout
-        self.input_size = 0
-        self.jk = jk
-        if jk:
-            self.register_parameter("jkparams", nn.Parameter(torch.randn((num_layers,))))
-        if self.use_feature:
-            self.input_size += in_channels
-        if self.embedding is not None:
-            self.input_size += embedding.embedding_dim
-        self.convs = torch.nn.ModuleList()
-        
-        if self.input_size > 0:
-            conv_func = SAGEConv
-            self.xemb = nn.Sequential(nn.Dropout(xdropout)) # nn.Identity()
-            if num_layers==0:
-                self.xemb.append(nn.Linear(self.input_size, hidden_channels))
-                self.xemb.append(nn.Dropout(dropout, inplace=True) if dropout > 1e-6 else nn.Identity())
-                self.input_size = hidden_channels
-            self.convs.append(conv_func(self.input_size, hidden_channels))
-            for _ in range(num_layers - 2):
-                self.convs.append(
-                    conv_func(hidden_channels, hidden_channels))
-            self.convs.append(conv_func(hidden_channels, out_channels))
-
-        self.dropout = dropout
-
-    def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear) or isinstance(m, nn.BatchNorm1d):
-                m.reset_parameters()
-
-    def forward(self, x, adj_t):
-        if self.input_size > 0:
-            xs = []
-            if self.use_feature:
-                xs.append(x)
-            if self.embedding is not None:
-                xs.append(self.embedding.weight)
-            x = torch.cat(xs, dim=1)
-            x = self.xemb(x)
-            jkx = []
-            for conv in self.convs:
-                x = conv(x, adj_t)
-                # x = F.relu(x) # FIXME: not using nonlinearity in Sketching
-                if self.jk:
-                    jkx.append(x)
-            if self.jk: # JumpingKnowledge Connection
-                jkx = torch.stack(jkx, dim=0)
-                sftmax = self.jkparams.reshape(-1, 1, 1)
-                x = torch.sum(jkx*sftmax, dim=0)
-        return x
 
 ########################
 ######### MPLP #########
@@ -432,7 +322,7 @@ class SAGE(torch.nn.Module):
 
 class MPLP(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers,
-                 feat_dropout, label_dropout, num_hops=2, prop_type='combine', signature_sampling='torchhd', use_degree='none',
+                 feat_dropout, label_dropout, num_hops=2, signature_sampling='torchhd', use_degree='none',
                  signature_dim=1024, minimum_degree_onehot=-1, batchnorm_affine=True,
                  feature_combine="hadamard"):
         super(MPLP, self).__init__()
@@ -441,7 +331,6 @@ class MPLP(torch.nn.Module):
         self.feat_dropout = feat_dropout
         self.label_dropout = label_dropout
         self.num_hops = num_hops
-        self.prop_type = prop_type # "MPLP+exactly","MPLP+prop_only","MPLP+combine"
         self.signature_sampling=signature_sampling
         self.use_degree = use_degree
         self.feature_combine = feature_combine
@@ -452,14 +341,9 @@ class MPLP(torch.nn.Module):
                 self.node_weight_encode = MLP(num_layers=2, in_channels=in_channels + 1, hidden_channels=32, out_channels=1,
                                      dropout=self.label_dropout, act='relu',
                                      norm="BatchNorm", norm_kwargs={"affine": batchnorm_affine})
-        if self.prop_type in ['prop_only', 'precompute']:
-            struct_dim = 8
-        elif self.prop_type == 'exact':
-            struct_dim = 5
-        elif self.prop_type == 'combine':
-            struct_dim = 15
-        self.nodelabel = NodeLabel(signature_dim, signature_sampling=self.signature_sampling, prop_type=self.prop_type,
-                               minimum_degree_onehot= minimum_degree_onehot)
+        struct_dim = 8
+        self.nodelabel = NodeLabel(signature_dim, signature_sampling=self.signature_sampling,
+                                    minimum_degree_onehot= minimum_degree_onehot)
         if USE_CUSTOM_MLP:
             self.struct_encode = CustomMLP(1, struct_dim, struct_dim, struct_dim, self.label_dropout, "batch", tailnormactdrop=True, affine=batchnorm_affine)
         else:
@@ -495,9 +379,6 @@ class MPLP(torch.nn.Module):
             edges: [2, E] target edges
             fast_inference: bool. If True, only caching the message-passing without calculating the structural features
         """
-        if cache_mode is None and self.prop_type == "precompute":
-            # when using precompute, forward always use cache_mode == 'use'
-            cache_mode = 'use'
         if cache_mode in ["use","delete"]:
             # no need to compute node_weight
             node_weight = None

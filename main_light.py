@@ -23,20 +23,13 @@ from sklearn.metrics import roc_auc_score
 from ogb.linkproppred import PygLinkPropPredDataset
 from ogb.linkproppred import Evaluator
 
-from models_light import GCN, SAGE, MPLP
+from models_light import GCN, MPLP
 from torch_geometric.nn.models import MLP
 
 from torch_geometric.utils import degree
 
 from tqdm import tqdm
 from logger import Logger
-
-MPLP_dict={
-    "MPLP": "combine",
-    "MPLP+": "prop_only",
-    "MPLP+exact": "exact",
-    "MPLP+precompute": "precompute",
-}
 
 
 ########################
@@ -79,8 +72,6 @@ def set_random_seeds(random_seed=0):
     r"""Sets the seed for generating random numbers."""
     torch.manual_seed(random_seed)
     torch.cuda.manual_seed_all(random_seed)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
     np.random.seed(random_seed)
     random.seed(random_seed)
 
@@ -163,8 +154,6 @@ def __spmdiff(adj1: SparseTensor,
     '''
     return elements in adj1 but not in adj2 and in adj2 but not adj1
     '''
-
-    
     element1, val1 = __spm2elem(adj1)
     element2, val2 = __spm2elem(adj2)
 
@@ -339,7 +328,6 @@ def make_symmetric(sparse_tensor, reduce='sum'):
 
     # Remove duplicates by summing the values for symmetric entries
     unique_indices, inverse_indices = torch.unique(new_indices, dim=1, return_inverse=True)
-    #unique_value = torch.zeros(unique_indices.size(1), device=value.device).scatter_add_(0, inverse_indices, new_value)
     unique_value = torch.zeros(unique_indices.size(1), device=value.device).scatter_reduce_(0, inverse_indices, new_value, reduce="amax")
 
     # Create the symmetric sparse tensor
@@ -490,8 +478,6 @@ def main():
     parser.add_argument('--mask_target', type=str2bool, default='True', help='whether to mask the target edges to remove the shortcut')
 
     # model setting
-    parser.add_argument('--predictor', type=str, default='MPLP', choices=["inner","mlp","ENL",
-    "MPLP+exact","MPLP+","MPLP","MPLP+precompute"])
     parser.add_argument('--encoder', type=str, default='gcn')
     parser.add_argument('--hidden_channels', type=int, default=256)
     parser.add_argument('--xdp', type=float, default=0.2)
@@ -573,10 +559,6 @@ def main():
             encoder = GCN(data.num_features, args.hidden_channels,
                         args.hidden_channels, args.num_layers,
                         args.feat_dropout, args.xdp, args.use_feature, args.jk, args.encoder, emb).to(device)
-        elif args.encoder == 'sage':
-            encoder = SAGE(data.num_features, args.hidden_channels,
-                        args.hidden_channels, args.num_layers,
-                        args.feat_dropout, args.xdp, args.use_feature, args.jk, emb).to(device)
         elif args.encoder == 'mlp':
             encoder = MLP(num_layers=args.num_layers, in_channels=data.num_features,
                           hidden_channels=args.hidden_channels, out_channels=args.hidden_channels,
@@ -584,16 +566,13 @@ def main():
 
         predictor_in_dim = args.hidden_channels * int(args.use_feature or args.use_embedding)
 
-        prop_type = MPLP_dict[args.predictor]
         predictor = MPLP(predictor_in_dim, args.hidden_channels,
                                 args.num_layers, args.feat_dropout, args.label_dropout, args.num_hops, 
-                                prop_type=prop_type, signature_sampling=args.signature_sampling,
+                                signature_sampling=args.signature_sampling,
                                 use_degree=args.use_degree, signature_dim=args.signature_dim,
                                 minimum_degree_onehot=args.minimum_degree_onehot, batchnorm_affine=args.batchnorm_affine,
                                 feature_combine=args.feature_combine)
-        if prop_type == "precompute":
-            assert args.use_degree != "mlp"
-            predictor.precompute(data.adj_t)
+
         predictor = predictor.to(device)
 
         encoder.reset_parameters()
