@@ -11,9 +11,7 @@ from torch_geometric.nn import GCNConv, SAGEConv
 from torch_geometric.nn.models import MLP
 from torch_geometric.utils import k_hop_subgraph as pyg_k_hop_subgraph, to_edge_index
 
-
 from torch_sparse import SparseTensor, matmul
-
 from torch_sparse.matmul import spmm_max, spmm_mean, spmm_add
 
 
@@ -23,7 +21,7 @@ from typing import Final
 
 import torchhd
 
-USE_OLD_MLP=False
+USE_CUSTOM_MLP=False
 
 ########################
 ###### NodeLabel #######
@@ -47,13 +45,10 @@ class NodeLabel(torch.nn.Module):
                 return self.propagation_only_cache(edges, adj_t, node_weight, cache_mode)
             elif self.prop_type == "precompute":
                 return self.propagation_prop_only_cache(edges, adj_t, node_weight, cache_mode)
-            else:
-                raise NotImplementedError()
         else:
             if self.prop_type == "prop_only":
                 return self.propagation_only(edges, adj_t, node_weight)
-            else:
-                raise NotImplementedError()
+        raise NotImplementedError()
 
     def get_random_node_vectors(self, adj_t: SparseTensor, node_weight) -> Tensor:
         num_nodes = adj_t.size(0)
@@ -110,8 +105,8 @@ class NodeLabel(torch.nn.Module):
         count_1_1 = dot_product(one_hop_x[0,:,:], one_hop_x[1,:,:])
         count_1_2 = dot_product(one_hop_x[0,:,:], two_hop_x[1,:,:])
         count_2_1 = dot_product(two_hop_x[0,:,:] , one_hop_x[1,:,:])
-        count_2_2 = dot_product((two_hop_x[0,:,:]-degree_one_hop[new_edges[0]].view(-1,1)*x[new_edges[0]]) , (two_hop_x[1,:,:]-degree_one_hop[new_edges[1]].view(-1,1)*x[new_edges[1]]))
-        
+        count_2_2 = dot_product((two_hop_x[0,:,:]-degree_one_hop[new_edges[0]].view(-1,1)*x[new_edges[0]]),
+                                (two_hop_x[1,:,:]-degree_one_hop[new_edges[1]].view(-1,1)*x[new_edges[1]]))
 
         count_self_1_2 = dot_product(one_hop_x[0,:,:] , two_hop_x[0,:,:])
         count_self_2_1 = dot_product(one_hop_x[1,:,:] , two_hop_x[1,:,:])
@@ -155,7 +150,6 @@ class NodeLabel(torch.nn.Module):
         count_2_1_only = dot_product(two_iter_x[edges[0]] , one_hop_x[edges[1]])
         count_2_2_only = dot_product((two_iter_x[edges[0]]),\
                                      (two_iter_x[edges[1]]))
-
 
         count_self_1_2 = dot_product(one_hop_x[edges[0]] , two_iter_x[edges[0]])
         count_self_2_1 = dot_product(one_hop_x[edges[1]] , two_iter_x[edges[1]])
@@ -232,7 +226,7 @@ dot_product = dotproduct_naive
 ######### MLP ##########
 ########################
 
-class OldMLP(nn.Module):
+class CustomMLP(nn.Module):
     def __init__(
         self,
         num_layers,
@@ -244,7 +238,7 @@ class OldMLP(nn.Module):
         tailnormactdrop=False,
         affine=True,
     ):
-        super(OldMLP, self).__init__()
+        super(CustomMLP, self).__init__()
         self.num_layers = num_layers
         self.norm_type = norm_type
         self.tailnormactdrop = tailnormactdrop
@@ -335,7 +329,7 @@ class GCN(torch.nn.Module):
                 conv_func = partial(GCNConv, cached=False)
             elif 'pure' in gcn_name:
                 conv_func = partial(PureConv, aggr='gcn')
-            self.xemb = nn.Sequential(nn.Dropout(xdropout)) # nn.Identity()
+            self.xemb = nn.Sequential(nn.Dropout(xdropout))
             if ("pure" in gcn_name or num_layers==0):
                 self.xemb.append(nn.Linear(self.input_size, hidden_channels))
                 self.xemb.append(nn.Dropout(dropout, inplace=True) if dropout > 1e-6 else nn.Identity())
@@ -364,7 +358,6 @@ class GCN(torch.nn.Module):
             jkx = []
             for conv in self.convs:
                 x = conv(x, adj_t)
-                # x = F.relu(x) # FIXME: not using nonlinearity in Sketching
                 if self.jk:
                     jkx.append(x)
             if self.jk: # JumpingKnowledge Connection
@@ -453,8 +446,8 @@ class MPLP(torch.nn.Module):
         self.use_degree = use_degree
         self.feature_combine = feature_combine
         if self.use_degree == 'mlp':
-            if USE_OLD_MLP:
-                self.node_weight_encode = OldMLP(2, in_channels + 1, 32, 1, feat_dropout, norm_type="batch", affine=batchnorm_affine)
+            if USE_CUSTOM_MLP:
+                self.node_weight_encode = CustomMLP(2, in_channels + 1, 32, 1, feat_dropout, norm_type="batch", affine=batchnorm_affine)
             else:
                 self.node_weight_encode = MLP(num_layers=2, in_channels=in_channels + 1, hidden_channels=32, out_channels=1,
                                      dropout=self.label_dropout, act='relu',
@@ -467,8 +460,8 @@ class MPLP(torch.nn.Module):
             struct_dim = 15
         self.nodelabel = NodeLabel(signature_dim, signature_sampling=self.signature_sampling, prop_type=self.prop_type,
                                minimum_degree_onehot= minimum_degree_onehot)
-        if USE_OLD_MLP:
-            self.struct_encode = OldMLP(1, struct_dim, struct_dim, struct_dim, self.label_dropout, "batch", tailnormactdrop=True, affine=batchnorm_affine)
+        if USE_CUSTOM_MLP:
+            self.struct_encode = CustomMLP(1, struct_dim, struct_dim, struct_dim, self.label_dropout, "batch", tailnormactdrop=True, affine=batchnorm_affine)
         else:
             self.struct_encode = MLP(num_layers=1, in_channels=struct_dim, hidden_channels=struct_dim, out_channels=struct_dim,
                                      dropout=self.label_dropout, act='relu', plain_last=False,
@@ -480,8 +473,8 @@ class MPLP(torch.nn.Module):
                 feat_encode_input_dim = in_channels
             elif feature_combine == "plus_minus":
                 feat_encode_input_dim = in_channels * 2
-            if USE_OLD_MLP:
-                self.feat_encode = OldMLP(2, feat_encode_input_dim, in_channels, in_channels, self.feat_dropout, "batch", tailnormactdrop=True, affine=batchnorm_affine)
+            if USE_CUSTOM_MLP:
+                self.feat_encode = CustomMLP(2, feat_encode_input_dim, in_channels, in_channels, self.feat_dropout, "batch", tailnormactdrop=True, affine=batchnorm_affine)
             else:
                 self.feat_encode = MLP(num_layers=1, in_channels=feat_encode_input_dim, hidden_channels=in_channels, out_channels=in_channels,
                                      dropout=self.label_dropout, act='relu', plain_last=False,
